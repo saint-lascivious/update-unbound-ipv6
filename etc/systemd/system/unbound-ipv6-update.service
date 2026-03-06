@@ -1,0 +1,34 @@
+[Unit]
+Description=Dynamic IPv6 config rewriting, validation, backups with periodic execution.
+Documentation=man:unbound.conf(5)
+After=network-online.target unbound.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0027
+
+# Create backup directory automatically if missing
+ExecStartPre=/usr/bin/install -d -m 0750 -o root -g root /var/backups/update-unbound-ipv6
+
+# Pass backup path into script
+Environment=BACKUP_DIR=/var/backups/update-unbound-ipv6
+
+ExecStart=/usr/local/bin/update-unbound-ipv6.sh
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+# Keep this as /var/backups (not the subdir), so namespacing does not fail
+# before ExecStartPre can create the subdirectory.
+ReadWritePaths=/etc/unbound /var/backups
+
+[Install]
+WantedBy=multi-user.target
