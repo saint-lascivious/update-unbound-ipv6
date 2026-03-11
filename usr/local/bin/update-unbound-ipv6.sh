@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # update-unbound-ipv6.sh
-# Dynamic IPv6 config rewriting, validation, backups with periodic execution.
+# Dynamic IPv6 config rewriting, validation, backups.
 
 CONFIG_FILE="${CONFIG_FILE:-/etc/unbound/unbound.conf.d/sainternet-domains.conf}"
 INTERFACE="${INTERFACE:-eth0}"
@@ -85,7 +85,6 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 ORIGINAL_PERMS=$(stat -c '%a' "$CONFIG_FILE")
-log_message "DEBUG: Original permissions: $ORIGINAL_PERMS"
 
 current_prefixes=$(get_current_ipv6)
 CURRENT_GLOBAL=$(printf "%s" "$current_prefixes" | cut -d'|' -f1)
@@ -106,14 +105,24 @@ if [ -z "$CONFIG_GLOBAL" ] || [ -z "$CONFIG_ULA" ]; then
 fi
 
 if [ "$CURRENT_GLOBAL" = "$CONFIG_GLOBAL" ] && [ "$CURRENT_ULA" = "$CONFIG_ULA" ]; then
-    log_message "IPv6 prefixes unchanged. No update needed."
-    log_message "Global: $CURRENT_GLOBAL, ULA: $CURRENT_ULA"
+    log_message "IPv6 prefixes unchanged."
+    log_message "Global prefix: $CURRENT_GLOBAL"
+    log_message "ULA prefix: $CURRENT_ULA"
     exit 0
 fi
 
-log_message "IPv6 prefix change detected!"
-log_message "Global: $CONFIG_GLOBAL -> $CURRENT_GLOBAL"
-log_message "ULA: $CONFIG_ULA -> $CURRENT_ULA"
+log_message "IPv6 prefix change detected."
+if [ "$CURRENT_GLOBAL" != "$CONFIG_GLOBAL" ]; then
+    log_message "Global prefix: $CONFIG_GLOBAL -> $CURRENT_GLOBAL"
+else
+    log_message "Global prefix unchanged: $CURRENT_GLOBAL"
+fi
+
+if [ "$CURRENT_ULA" != "$CONFIG_ULA" ]; then
+    log_message "ULA prefix: $CONFIG_ULA -> $CURRENT_ULA"
+else
+    log_message "ULA prefix unchanged: $CURRENT_ULA"
+fi
 
 backup_file="$BACKUP_DIR/${CONFIG_FILENAME}.$(date +%Y%m%d-%H%M%S)"
 cp "$CONFIG_FILE" "$backup_file" || {
@@ -132,10 +141,7 @@ cp "$CONFIG_FILE" "$temp_file" || {
     exit 1
 }
 
-# Update global IPv6 prefix: replace first 4 hextets only, preserve last 4
 sed -i "s|$CONFIG_GLOBAL:\([0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F]*\)|$CURRENT_GLOBAL:\1|g" "$temp_file"
-
-# Update ULA prefix: replace first 4 hextets only, preserve last 4
 sed -i "s|$CONFIG_ULA:\([0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F]*\)|$CURRENT_ULA:\1|g" "$temp_file"
 
 if ! update_config_header "$temp_file"; then
@@ -157,7 +163,6 @@ chmod "$ORIGINAL_PERMS" "$CONFIG_FILE" || {
     cp "$backup_file" "$CONFIG_FILE"
     exit 1
 }
-log_message "DEBUG: Restored permissions to $ORIGINAL_PERMS"
 
 if checkconf_output=$(unbound-checkconf 2>&1); then
     log_message "Config validated successfully. Restarting Unbound..."
@@ -172,7 +177,7 @@ if checkconf_output=$(unbound-checkconf 2>&1); then
         exit 1
     fi
 else
-    log_message "ERROR: Config validation failed! Restoring backup..."
+    log_message "ERROR: Config validation failed. Restoring backup..."
     printf "%s\n" "$checkconf_output" | while IFS= read -r line; do
         log_message "  $line"
     done

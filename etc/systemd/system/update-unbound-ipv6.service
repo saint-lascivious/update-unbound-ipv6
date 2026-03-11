@@ -1,5 +1,5 @@
 [Unit]
-Description=Dynamic IPv6 config rewriting, validation, backups with periodic execution.
+Description=Dynamic IPv6 config rewriting, validation, backups.
 Documentation=man:unbound.conf(5)
 After=network-online.target unbound.service
 Wants=network-online.target
@@ -10,24 +10,23 @@ User=root
 Group=root
 UMask=0027
 
-# Create backup directory automatically if missing
 ExecStartPre=/usr/bin/install -d -m 0750 -o root -g root /var/backups/update-unbound-ipv6
 
-# Pass backup path into script
+ExecStartPre=/bin/sh -ec 'for b in ip unbound unbound-checkconf; do command -v "$b" >/dev/null 2>&1 || { printf "Missing required binary: %s\n" "$b" >&2; exit 1; }; done'
+ExecStartPre=/bin/sh -ec 'test -x /usr/local/bin/update-unbound-ipv6.sh'
+
 Environment=BACKUP_DIR=/var/backups/update-unbound-ipv6
 
 ExecStart=/usr/local/bin/update-unbound-ipv6.sh
+
 StandardOutput=journal
 StandardError=journal
 
-# Security hardening
 PrivateTmp=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 
-# Keep this as /var/backups (not the subdir), so namespacing does not fail
-# before ExecStartPre can create the subdirectory.
 ReadWritePaths=/etc/unbound /var/backups
 
 [Install]
