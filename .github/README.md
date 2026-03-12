@@ -21,7 +21,7 @@ Automatically keeps an Unbound local DNS config in sync with your host’s curre
   - `unbound`
   - `systemd`
   - `iproute2` (`ip`)
-  - standard POSIX tools (`sh`, `grep`, `awk`, `sed`, `cut`, `mktemp`)
+  - standard POSIX tools (`sh`, `grep`, `awk`, `sed`, `cut`, `mktemp` etc.)
 - Root privileges for install and service management
 
 ## Project files
@@ -48,7 +48,7 @@ with
 # update-unbound-ipv6.sh
 # Dynamic IPv6 config rewriting, validation, backups.
 
-CONFIG_FILE="${CONFIG_FILE:-/etc/unbound/unbound.conf.d/sainternet-domains.conf}"
+CONFIG_FILE="${CONFIG_FILE:-/etc/unbound/unbound.conf.d/local-domains.conf}"
 INTERFACE="${INTERFACE:-eth0}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/update-unbound-ipv6}"
 export LOG_TAG="${LOG_TAG:-update-unbound-ipv6}"
@@ -57,8 +57,48 @@ CONFIG_FILENAME=$(basename "$CONFIG_FILE")
 
 mkdir -p "$BACKUP_DIR" || exit 1
 
+temp_file=""
+trap '[ -n "$temp_file" ] && [ -f "$temp_file" ] && rm -f -- "$temp_file"' EXIT INT TERM HUP
+
 log_message() {
     printf "%s: %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$1"
+}
+
+restore_metadata() {
+    target_file="$1"
+
+    current_perms=$(stat -c '%a' "$target_file") || return 1
+    current_uid=$(stat -c '%u' "$target_file") || return 1
+    current_gid=$(stat -c '%g' "$target_file") || return 1
+    current_user=$(stat -c '%U' "$target_file") || return 1
+    current_group=$(stat -c '%G' "$target_file") || return 1
+
+    if [ "$current_perms" != "$ORIGINAL_PERMS" ]; then
+        log_message "Permissions changed: $current_perms -> $ORIGINAL_PERMS. Restoring..."
+        chmod "$ORIGINAL_PERMS" "$target_file" || return 1
+    fi
+
+    if [ "$current_uid" != "$ORIGINAL_UID" ] || [ "$current_gid" != "$ORIGINAL_GID" ]; then
+        if [ "$current_uid" != "$ORIGINAL_UID" ]; then
+            log_message "Owner changed: $current_user($current_uid) -> $ORIGINAL_USER($ORIGINAL_UID). Restoring..."
+        fi
+        if [ "$current_gid" != "$ORIGINAL_GID" ]; then
+            log_message "Group changed: $current_group($current_gid) -> $ORIGINAL_GROUP($ORIGINAL_GID). Restoring..."
+        fi
+        chown "$ORIGINAL_UID:$ORIGINAL_GID" "$target_file" || return 1
+    fi
+
+    return 0
+}
+
+restore_backup() {
+    if cp -p "$backup_file" "$CONFIG_FILE"; then
+        if ! restore_metadata "$CONFIG_FILE"; then
+            log_message "WARNING: Backup restored, but failed to restore metadata to original values."
+        fi
+        return 0
+    fi
+    return 1
 }
 
 update_config_header() {
@@ -129,7 +169,30 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
-ORIGINAL_PERMS=$(stat -c '%a' "$CONFIG_FILE")
+if ! ORIGINAL_PERMS=$(stat -c '%a' "$CONFIG_FILE"); then
+    log_message "ERROR: Failed to read original config permissions from $CONFIG_FILE"
+    exit 1
+fi
+
+if ! ORIGINAL_UID=$(stat -c '%u' "$CONFIG_FILE"); then
+    log_message "ERROR: Failed to read original config owner UID from $CONFIG_FILE"
+    exit 1
+fi
+
+if ! ORIGINAL_GID=$(stat -c '%g' "$CONFIG_FILE"); then
+    log_message "ERROR: Failed to read original config group GID from $CONFIG_FILE"
+    exit 1
+fi
+
+if ! ORIGINAL_USER=$(stat -c '%U' "$CONFIG_FILE"); then
+    log_message "ERROR: Failed to read original config owner name from $CONFIG_FILE"
+    exit 1
+fi
+
+if ! ORIGINAL_GROUP=$(stat -c '%G' "$CONFIG_FILE"); then
+    log_message "ERROR: Failed to read original config group name from $CONFIG_FILE"
+    exit 1
+fi
 
 current_prefixes=$(get_current_ipv6)
 CURRENT_GLOBAL=$(printf "%s" "$current_prefixes" | cut -d'|' -f1)
@@ -170,7 +233,7 @@ else
 fi
 
 backup_file="$BACKUP_DIR/${CONFIG_FILENAME}.$(date +%Y%m%d-%H%M%S)"
-cp "$CONFIG_FILE" "$backup_file" || {
+cp -p "$CONFIG_FILE" "$backup_file" || {
     log_message "ERROR: Failed to create backup."
     exit 1
 }
@@ -192,22 +255,22 @@ sed -i "s|$CONFIG_ULA:\([0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F]*\)|$C
 if ! update_config_header "$temp_file"; then
     log_message "ERROR: Failed to update config header. Restoring backup..."
     rm -f "$temp_file"
-    cp "$backup_file" "$CONFIG_FILE"
+    restore_backup || log_message "ERROR: Failed to restore backup."
     exit 1
 fi
 
 if ! mv "$temp_file" "$CONFIG_FILE"; then
     log_message "ERROR: Failed to write config file. Restoring backup..."
     rm -f "$temp_file"
-    cp "$backup_file" "$CONFIG_FILE"
+    restore_backup || log_message "ERROR: Failed to restore backup."
     exit 1
 fi
 
-chmod "$ORIGINAL_PERMS" "$CONFIG_FILE" || {
-    log_message "ERROR: Failed to restore config permissions. Restoring backup..."
-    cp "$backup_file" "$CONFIG_FILE"
+if ! restore_metadata "$CONFIG_FILE"; then
+    log_message "ERROR: Failed to restore config metadata. Restoring backup..."
+    restore_backup || log_message "ERROR: Failed to restore backup."
     exit 1
-}
+fi
 
 if checkconf_output=$(unbound-checkconf 2>&1); then
     log_message "Config validated successfully. Restarting Unbound..."
@@ -218,7 +281,7 @@ if checkconf_output=$(unbound-checkconf 2>&1); then
         exit 0
     else
         log_message "ERROR: Failed to restart Unbound. Restoring backup..."
-        cp "$backup_file" "$CONFIG_FILE"
+        restore_backup || log_message "ERROR: Failed to restore backup."
         exit 1
     fi
 else
@@ -226,7 +289,7 @@ else
     printf "%s\n" "$checkconf_output" | while IFS= read -r line; do
         log_message "  $line"
     done
-    cp "$backup_file" "$CONFIG_FILE"
+    restore_backup || log_message "ERROR: Failed to restore backup."
     exit 1
 fi
 
@@ -277,7 +340,7 @@ UMask=0027
 
 ExecStartPre=/usr/bin/install -d -m 0750 -o root -g root /var/backups/update-unbound-ipv6
 
-ExecStartPre=/bin/sh -ec 'for b in ip unbound unbound-checkconf; do command -v "$b" >/dev/null 2>&1 || { printf "Missing required binary: %s\n" "$b" >&2; exit 1; }; done'
+ExecStartPre=/bin/sh -ec 'for b in awk basename cat chmod chown cp cut date find grep head ip mkdir mktemp mv rm sed sort stat systemctl tail tr unbound unbound-checkconf xargs; do command -v "$b" >/dev/null 2>&1 || { printf "Missing required binary: %s\n" "$b" >&2; exit 1; }; done'
 ExecStartPre=/bin/sh -ec 'test -x /usr/local/bin/update-unbound-ipv6.sh'
 
 Environment=BACKUP_DIR=/var/backups/update-unbound-ipv6

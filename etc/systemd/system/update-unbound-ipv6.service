@@ -12,7 +12,7 @@ UMask=0027
 
 ExecStartPre=/usr/bin/install -d -m 0750 -o root -g root /var/backups/update-unbound-ipv6
 
-ExecStartPre=/bin/sh -ec 'for b in ip unbound unbound-checkconf; do command -v "$b" >/dev/null 2>&1 || { printf "Missing required binary: %s\n" "$b" >&2; exit 1; }; done'
+ExecStartPre=/bin/sh -ec 'for b in awk basename cat chmod chown cp cut date find grep head ip mkdir mktemp mv rm sed sort stat systemctl tail tr unbound unbound-checkconf xargs; do command -v "$b" >/dev/null 2>&1 || { printf "Missing required binary: %s\n" "$b" >&2; exit 1; }; done'
 ExecStartPre=/bin/sh -ec 'test -x /usr/local/bin/update-unbound-ipv6.sh'
 
 Environment=BACKUP_DIR=/var/backups/update-unbound-ipv6
