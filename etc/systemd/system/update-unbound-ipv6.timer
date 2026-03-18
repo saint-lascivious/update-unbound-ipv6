@@ -1,18 +1,14 @@
 [Unit]
-Description=Executes unbound-ipv6-update periodically.
+Description=yExecutes unbound-ipv6-update.service periodically.
 Documentation=man:systemd.timer(5)
-Requires=update-unbound-ipv6.service
 
 [Timer]
 OnBootSec=2min
-
 OnCalendar=hourly
 Persistent=true
-
 RandomizedDelaySec=5min
 AccuracySec=1min
-
-Unit=unbound-ipv6-update.service
+Unit=update-unbound-ipv6.service
 
 [Install]
 WantedBy=timers.target

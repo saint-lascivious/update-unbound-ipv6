@@ -1,5 +1,5 @@
 [Unit]
-Description=Dynamic IPv6 config rewriting, validation, backups.
+Description=Detects IPv6 prefix changes and rewrites local Unbound config.
 Documentation=man:unbound.conf(5)
 After=network-online.target unbound.service
 Wants=network-online.target
@@ -10,12 +10,12 @@ User=root
 Group=root
 UMask=0027
 
-ExecStartPre=/usr/bin/install -d -m 0750 -o root -g root /var/backups/update-unbound-ipv6
-
-ExecStartPre=/bin/sh -ec 'for b in awk basename cat chmod chown cp cut date find grep head ip mkdir mktemp mv rm sed sort stat systemctl tail tr unbound unbound-checkconf xargs; do command -v "$b" >/dev/null 2>&1 || { printf "Missing required binary: %s\n" "$b" >&2; exit 1; }; done'
 ExecStartPre=/bin/sh -ec 'test -x /usr/local/bin/update-unbound-ipv6.sh'
 
 Environment=BACKUP_DIR=/var/backups/update-unbound-ipv6
+Environment=STATUS_DIR=/var/lib/update-unbound-ipv6
+Environment=WEBROOT_DIR=/var/www/html
+Environment=LOCK_DIR=/var/lock/update-unbound-ipv6.lock
 
 ExecStart=/usr/local/bin/update-unbound-ipv6.sh
 
@@ -27,7 +27,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 
-ReadWritePaths=/etc/unbound /var/backups
+ReadWritePaths=/etc/unbound/unbound.conf.d /var/backups/update-unbound-ipv6 /var/lib/update-unbound-ipv6 /var/www/html /var/lock
 
 [Install]
 WantedBy=multi-user.target

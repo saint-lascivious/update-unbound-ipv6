@@ -1,6 +1,22 @@
 # RUNBOOK for update-unbound-ipv6.sh
 
-## Quick Restore: Latest Backup + Restart Unbound
+## Stop and Disable update-unbound-ipv6 Service
+
+### Stop update-unbound-ipv6 Service
+
+```sh
+sudo systemctl stop update-unbound-ipv6.timer
+sudo systemctl stop update-unbound-ipv6.service
+```
+
+### Disable update-unbound-ipv6 Service
+
+```sh
+sudo systemctl disable update-unbound-ipv6.timer
+sudo systemctl disable update-unbound-ipv6.service
+```
+
+## Restore Latest Backup + Restart Unbound
 
 ```sh
 # Find newest backup file

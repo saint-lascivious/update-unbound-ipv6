@@ -1,446 +1,219 @@
 # update-unbound-ipv6
 
-Automatically keeps an Unbound local DNS config in sync with your host’s current IPv6 prefixes (global + ULA), validates changes, writes a metadata header, and restarts Unbound only when needed.
+Detects IPv6 prefix changes and rewrites local Unbound config.
 
-## What it does
+## Features
 
-- Detects current IPv6 prefixes on a selected network interface
-- Compares them with prefixes currently used in `sainternet-domains.conf`
-- Rewrites matching IPv6 entries when prefixes change
-- Adds/updates a header in the config showing:
-  - what edited the file
-  - when it was last edited
-- Validates config using `unbound-checkconf`
-- Restarts Unbound on valid changes
-- Restores from backup on failure
-- Runs automatically at boot + periodically via `systemd` timer
+- Detects current IPv6 prefixes on an interface
+- Supports:
+  - global unicast
+  - ULA
+  - link-local
+- Rewrites matching IPv6 addresses in an Unbound config fragment
+- Preserves file ownership and permissions
+- Creates rolling backups
+- Validates config before reload/restart
+- Restores the last backup on failure
+- Writes plaintext and/or JSON status files (each independently configurable)
+- Maintains a managed header in the target config file
 
 ## Requirements
 
-- Linux host with:
-  - `unbound`
-  - `systemd`
-  - `iproute2` (`ip`)
-  - standard POSIX tools (`sh`, `grep`, `awk`, `sed`, `cut`, `mktemp` etc.)
-- Root privileges for install and service management
+- Linux
+- `unbound`
+- `systemd`
+- `iproute2`
+- standard POSIX tools (`sh`, `awk`, `sed`, `grep`, `cut`, `mktemp`, etc.)
+- root privileges for install and service management
 
-## Project files
+## Repository layout
 
-- `update-unbound-ipv6.sh` → main POSIX `sh` update script
-- `update-unbound-ipv6.service` → one-shot systemd unit
-- `update-unbound-ipv6.timer` → periodic scheduler
+Expected files:
 
----
+- `usr/local/bin/update-unbound-ipv6.sh`
+- `etc/systemd/system/update-unbound-ipv6.service`
+- `etc/systemd/system/update-unbound-ipv6.timer`
+- `etc/unbound/unbound.conf.d/local-domains.conf` (example)
 
-## Manual installation
+## Install
 
-### 1) Install the script
-
-Create:
-
-`/usr/local/bin/update-unbound-ipv6.sh`
-
-with
+Clone the repository:
 
 ```sh
-#!/bin/sh
-
-# update-unbound-ipv6.sh
-# Dynamic IPv6 config rewriting, validation, backups.
-
-CONFIG_FILE="${CONFIG_FILE:-/etc/unbound/unbound.conf.d/local-domains.conf}"
-INTERFACE="${INTERFACE:-eth0}"
-BACKUP_DIR="${BACKUP_DIR:-/var/backups/update-unbound-ipv6}"
-export LOG_TAG="${LOG_TAG:-update-unbound-ipv6}"
-
-CONFIG_FILENAME=$(basename "$CONFIG_FILE")
-
-mkdir -p "$BACKUP_DIR" || exit 1
-
-temp_file=""
-trap '[ -n "$temp_file" ] && [ -f "$temp_file" ] && rm -f -- "$temp_file"' EXIT INT TERM HUP
-
-log_message() {
-    printf "%s: %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$1"
-}
-
-restore_metadata() {
-    target_file="$1"
-
-    current_perms=$(stat -c '%a' "$target_file") || return 1
-    current_uid=$(stat -c '%u' "$target_file") || return 1
-    current_gid=$(stat -c '%g' "$target_file") || return 1
-    current_user=$(stat -c '%U' "$target_file") || return 1
-    current_group=$(stat -c '%G' "$target_file") || return 1
-
-    if [ "$current_perms" != "$ORIGINAL_PERMS" ]; then
-        log_message "Permissions changed: $current_perms -> $ORIGINAL_PERMS. Restoring..."
-        chmod "$ORIGINAL_PERMS" "$target_file" || return 1
-    fi
-
-    if [ "$current_uid" != "$ORIGINAL_UID" ] || [ "$current_gid" != "$ORIGINAL_GID" ]; then
-        if [ "$current_uid" != "$ORIGINAL_UID" ]; then
-            log_message "Owner changed: $current_user($current_uid) -> $ORIGINAL_USER($ORIGINAL_UID). Restoring..."
-        fi
-        if [ "$current_gid" != "$ORIGINAL_GID" ]; then
-            log_message "Group changed: $current_group($current_gid) -> $ORIGINAL_GROUP($ORIGINAL_GID). Restoring..."
-        fi
-        chown "$ORIGINAL_UID:$ORIGINAL_GID" "$target_file" || return 1
-    fi
-
-    return 0
-}
-
-restore_backup() {
-    if cp -p "$backup_file" "$CONFIG_FILE"; then
-        if ! restore_metadata "$CONFIG_FILE"; then
-            log_message "WARNING: Backup restored, but failed to restore metadata to original values."
-        fi
-        return 0
-    fi
-    return 1
-}
-
-update_config_header() {
-    config_file="$1"
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S %Z')
-    header_tmp=$(mktemp) || return 1
-
-    if grep -q "^# Last edited by: update-unbound-ipv6.sh" "$config_file"; then
-        awk -v ts="$timestamp" '
-            /^# Last edited by: update-unbound-ipv6.sh/ {
-                print "# Last edited by: update-unbound-ipv6.sh"
-                print "# Last edit time: " ts
-                getline
-                next
-            }
-            { print }
-        ' "$config_file" > "$header_tmp" || {
-            rm -f "$header_tmp"
-            return 1
-        }
-    else
-        {
-            printf "# Last edited by: update-unbound-ipv6.sh\n"
-            printf "# Last edit time: %s\n" "$timestamp"
-            printf "# This file is automatically maintained for IPv6 prefix updates\n"
-            printf "#\n"
-            cat "$config_file"
-        } > "$header_tmp" || {
-            rm -f "$header_tmp"
-            return 1
-        }
-    fi
-
-    mv "$header_tmp" "$config_file" || {
-        rm -f "$header_tmp"
-        return 1
-    }
-}
-
-get_current_ipv6() {
-    global_prefix=$(ip -6 addr show "$INTERFACE" scope global | \
-        grep 'inet6' | grep -vi '^.* fd' | head -n1 | \
-        awk '{print $2}' | cut -d'/' -f1 | cut -d':' -f1-4 | tr 'A-F' 'a-f')
-
-    ula_prefix=$(ip -6 addr show "$INTERFACE" scope global | \
-        grep 'inet6' | grep -i ' fd' | head -n1 | \
-        awk '{print $2}' | cut -d'/' -f1 | cut -d':' -f1-4 | tr 'A-F' 'a-f')
-
-    printf "%s|%s\n" "$global_prefix" "$ula_prefix"
-}
-
-get_config_prefixes() {
-    all_ipv6=$(grep -oE '([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}' "$CONFIG_FILE" | tr 'A-F' 'a-f')
-
-    global_prefix=$(printf "%s\n" "$all_ipv6" | grep -vi '^fd' | head -n1 | cut -d':' -f1-4)
-    ula_prefix=$(printf "%s\n" "$all_ipv6" | grep -i '^fd' | head -n1 | cut -d':' -f1-4)
-
-    printf "%s|%s\n" "$global_prefix" "$ula_prefix"
-}
-
-if ! ip link show "$INTERFACE" > /dev/null 2>&1; then
-    log_message "ERROR: Interface $INTERFACE not found"
-    exit 1
-fi
-
-if [ ! -f "$CONFIG_FILE" ]; then
-    log_message "ERROR: Config file $CONFIG_FILE not found"
-    exit 1
-fi
-
-if ! ORIGINAL_PERMS=$(stat -c '%a' "$CONFIG_FILE"); then
-    log_message "ERROR: Failed to read original config permissions from $CONFIG_FILE"
-    exit 1
-fi
-
-if ! ORIGINAL_UID=$(stat -c '%u' "$CONFIG_FILE"); then
-    log_message "ERROR: Failed to read original config owner UID from $CONFIG_FILE"
-    exit 1
-fi
-
-if ! ORIGINAL_GID=$(stat -c '%g' "$CONFIG_FILE"); then
-    log_message "ERROR: Failed to read original config group GID from $CONFIG_FILE"
-    exit 1
-fi
-
-if ! ORIGINAL_USER=$(stat -c '%U' "$CONFIG_FILE"); then
-    log_message "ERROR: Failed to read original config owner name from $CONFIG_FILE"
-    exit 1
-fi
-
-if ! ORIGINAL_GROUP=$(stat -c '%G' "$CONFIG_FILE"); then
-    log_message "ERROR: Failed to read original config group name from $CONFIG_FILE"
-    exit 1
-fi
-
-current_prefixes=$(get_current_ipv6)
-CURRENT_GLOBAL=$(printf "%s" "$current_prefixes" | cut -d'|' -f1)
-CURRENT_ULA=$(printf "%s" "$current_prefixes" | cut -d'|' -f2)
-
-if [ -z "$CURRENT_GLOBAL" ] || [ -z "$CURRENT_ULA" ]; then
-    log_message "WARNING: Could not detect IPv6 addresses on $INTERFACE"
-    exit 0
-fi
-
-config_prefixes=$(get_config_prefixes)
-CONFIG_GLOBAL=$(printf "%s" "$config_prefixes" | cut -d'|' -f1)
-CONFIG_ULA=$(printf "%s" "$config_prefixes" | cut -d'|' -f2)
-
-if [ -z "$CONFIG_GLOBAL" ] || [ -z "$CONFIG_ULA" ]; then
-    log_message "ERROR: Could not extract existing IPv6 prefixes from $CONFIG_FILE"
-    exit 1
-fi
-
-if [ "$CURRENT_GLOBAL" = "$CONFIG_GLOBAL" ] && [ "$CURRENT_ULA" = "$CONFIG_ULA" ]; then
-    log_message "IPv6 prefixes unchanged."
-    log_message "Global prefix: $CURRENT_GLOBAL"
-    log_message "ULA prefix: $CURRENT_ULA"
-    exit 0
-fi
-
-log_message "IPv6 prefix change detected."
-if [ "$CURRENT_GLOBAL" != "$CONFIG_GLOBAL" ]; then
-    log_message "Global prefix: $CONFIG_GLOBAL -> $CURRENT_GLOBAL"
-else
-    log_message "Global prefix unchanged: $CURRENT_GLOBAL"
-fi
-
-if [ "$CURRENT_ULA" != "$CONFIG_ULA" ]; then
-    log_message "ULA prefix: $CONFIG_ULA -> $CURRENT_ULA"
-else
-    log_message "ULA prefix unchanged: $CURRENT_ULA"
-fi
-
-backup_file="$BACKUP_DIR/${CONFIG_FILENAME}.$(date +%Y%m%d-%H%M%S)"
-cp -p "$CONFIG_FILE" "$backup_file" || {
-    log_message "ERROR: Failed to create backup."
-    exit 1
-}
-log_message "Backed up config to $backup_file"
-
-temp_file=$(mktemp) || {
-    log_message "ERROR: Failed to create temp file."
-    exit 1
-}
-cp "$CONFIG_FILE" "$temp_file" || {
-    log_message "ERROR: Failed to stage config copy."
-    rm -f "$temp_file"
-    exit 1
-}
-
-sed -i "s|$CONFIG_GLOBAL:\([0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F]*\)|$CURRENT_GLOBAL:\1|g" "$temp_file"
-sed -i "s|$CONFIG_ULA:\([0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F]*\)|$CURRENT_ULA:\1|g" "$temp_file"
-
-if ! update_config_header "$temp_file"; then
-    log_message "ERROR: Failed to update config header. Restoring backup..."
-    rm -f "$temp_file"
-    restore_backup || log_message "ERROR: Failed to restore backup."
-    exit 1
-fi
-
-if ! mv "$temp_file" "$CONFIG_FILE"; then
-    log_message "ERROR: Failed to write config file. Restoring backup..."
-    rm -f "$temp_file"
-    restore_backup || log_message "ERROR: Failed to restore backup."
-    exit 1
-fi
-
-if ! restore_metadata "$CONFIG_FILE"; then
-    log_message "ERROR: Failed to restore config metadata. Restoring backup..."
-    restore_backup || log_message "ERROR: Failed to restore backup."
-    exit 1
-fi
-
-if checkconf_output=$(unbound-checkconf 2>&1); then
-    log_message "Config validated successfully. Restarting Unbound..."
-    if systemctl restart unbound; then
-        log_message "Unbound restarted successfully."
-        find "$BACKUP_DIR" -name "${CONFIG_FILENAME}.*" -type f -printf '%T@ %p\n' | \
-            sort -rn | tail -n +11 | cut -d' ' -f2- | xargs -r rm --
-        exit 0
-    else
-        log_message "ERROR: Failed to restart Unbound. Restoring backup..."
-        restore_backup || log_message "ERROR: Failed to restore backup."
-        exit 1
-    fi
-else
-    log_message "ERROR: Config validation failed. Restoring backup..."
-    printf "%s\n" "$checkconf_output" | while IFS= read -r line; do
-        log_message "  $line"
-    done
-    restore_backup || log_message "ERROR: Failed to restore backup."
-    exit 1
-fi
-
+git clone https://github.com/saint-lascivious/update-unbound-ipv6.git
+cd update-unbound-ipv6
 ```
 
-Make it executable:
+Install the script and systemd units:
 
 ```sh
-sudo chmod +x /usr/local/bin/update-unbound-ipv6.sh
+sudo install -D -m 0755 usr/local/bin/update-unbound-ipv6.sh /usr/local/bin/update-unbound-ipv6.sh
+sudo install -D -m 0644 etc/systemd/system/update-unbound-ipv6.service /etc/systemd/system/update-unbound-ipv6.service
+sudo install -D -m 0644 etc/systemd/system/update-unbound-ipv6.timer /etc/systemd/system/update-unbound-ipv6.timer
 ```
 
-Edit the interface name in the script:
+Install the example Unbound fragment if needed:
 
 ```sh
-sudo nano /usr/local/bin/update-unbound-ipv6.sh
+sudo install -D -m 0644 etc/unbound/unbound.conf.d/local-domains.conf /etc/unbound/unbound.conf.d/local-domains.conf
 ```
 
-Set:
-
-```sh
-INTERFACE="eth0"
-```
-
-to your real interface (examples: `ens18`, `enp3s0`, `wlan0`).
-
----
-
-### 2) Install the systemd service
-
-Create:
-
-`/etc/systemd/system/update-unbound-ipv6.service`
-
-with:
-
-```ini
-[Unit]
-Description=Dynamic IPv6 config rewriting, validation, backups.
-Documentation=man:unbound.conf(5)
-After=network-online.target unbound.service
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-User=root
-Group=root
-UMask=0027
-
-ExecStartPre=/usr/bin/install -d -m 0750 -o root -g root /var/backups/update-unbound-ipv6
-
-ExecStartPre=/bin/sh -ec 'for b in awk basename cat chmod chown cp cut date find grep head ip mkdir mktemp mv rm sed sort stat systemctl tail tr unbound unbound-checkconf xargs; do command -v "$b" >/dev/null 2>&1 || { printf "Missing required binary: %s\n" "$b" >&2; exit 1; }; done'
-ExecStartPre=/bin/sh -ec 'test -x /usr/local/bin/update-unbound-ipv6.sh'
-
-Environment=BACKUP_DIR=/var/backups/update-unbound-ipv6
-
-ExecStart=/usr/local/bin/update-unbound-ipv6.sh
-
-StandardOutput=journal
-StandardError=journal
-
-PrivateTmp=yes
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-
-ReadWritePaths=/etc/unbound /var/backups
-
-[Install]
-WantedBy=multi-user.target
-
-```
-
----
-
-### 3) Install the systemd timer
-
-Create:
-
-`/etc/systemd/system/update-unbound-ipv6.timer`
-
-with:
-
-```ini
-[Unit]
-Description=Executes unbound-ipv6-update periodically.
-Documentation=man:systemd.timer(5)
-Requires=update-unbound-ipv6.service
-
-[Timer]
-OnBootSec=2min
-
-OnCalendar=hourly
-Persistent=true
-
-RandomizedDelaySec=5min
-AccuracySec=1min
-
-Unit=unbound-ipv6-update.service
-
-[Install]
-WantedBy=timers.target
-
-```
-
----
-
-### 4) Reload systemd and enable timer
+Reload systemd and enable the timer:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable update-unbound-ipv6
-sudo systemctl start update-unbound-ipv6
+sudo systemctl enable --now update-unbound-ipv6.timer
 ```
 
----
+## Configuration
 
-### 5) Verify
+The script uses environment variables.
 
-Check timer:
+Common settings:
+
+- `CONFIG_FILE`  
+  Default: `/etc/unbound/unbound.conf.d/local-domains.conf`
+- `INTERFACE`  
+  Default: `eth0`
+- `BACKUP_DIR`  
+  Default: `/var/backups/update-unbound-ipv6`
+- `NUM_BACKUPS`  
+  Default: `10`
+- `VERBOSITY`  
+  Default: `1` (ERROR)
+- `LOG_TO_SYSLOG`  
+  Default: `0` (disabled)
+- `LOG_TAG`  
+  Default: `update-unbound-ipv6`
+- `STATUS_TXT_ENABLED`  
+  Default: `0` (disabled)
+- `STATUS_DIR`  
+  Default: `/var/lib/update-unbound-ipv6`
+- `STATUS_TXT`  
+  Default: `$STATUS_DIR/status.txt`
+- `STATUS_JSON_ENABLED`  
+  Default: `0` (disabled)
+- `WEBROOT_DIR`  
+  Default: `/var/www/html`
+- `STATUS_JSON`  
+  Default: `$WEBROOT_DIR/update-unbound-ipv6-status.json`
+- `DRY_RUN`  
+  Default: `0` (disabled)
+- `LOCK_DIR`  
+  Default: `/var/lock/update-unbound-ipv6.lock`
+
+Recommended: Override settings with systemd instead of editing the script directly.
+
+Create an override:
 
 ```sh
-sudo systemctl status update-unbound-ipv6
-sudo systemctl list-timers update-unbound-ipv6
+sudo systemctl edit update-unbound-ipv6.service
 ```
 
-Run script manually once:
+Example:
+
+```ini
+[Service]
+Environment=CONFIG_FILE=/etc/unbound/unbound.conf.d/local-domains.conf
+Environment=INTERFACE=eth0
+Environment=BACKUP_DIR=/var/backups/update-unbound-ipv6
+Environment=NUM_BACKUPS=10
+Environment=VERBOSITY=1
+Environment=LOG_TO_SYSLOG=0
+Environment=LOG_TAG=update-unbound-ipv6
+Environment=STATUS_TXT_ENABLED=0
+Environment=STATUS_DIR=/var/lib/update-unbound-ipv6
+Environment=STATUS_JSON_ENABLED=0
+Environment=WEBROOT_DIR=/var/www/html
+Environment=STATUS_JSON=/var/www/html/update-unbound-ipv6-status.json
+Environment=DRY_RUN=0
+Environment=LOCK_DIR=/var/lock/update-unbound-ipv6.lock
+```
+
+Then reload systemd:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl restart update-unbound-ipv6.timer
+```
+
+If `CONFIG_FILE` is changed to a path outside the service's allowed write locations, the service override may also need a matching `ReadWritePaths=` override as `ReadWritePaths=` does not automatically follow `CONFIG_FILE`.
+
+## Usage
+
+Run once manually:
+
+```sh
+sudo systemctl start update-unbound-ipv6.service
+```
+
+Or run the script directly:
 
 ```sh
 sudo /usr/local/bin/update-unbound-ipv6.sh
 ```
 
-View logs:
+Dry run:
+
+```sh
+sudo env DRY_RUN=1 /usr/local/bin/update-unbound-ipv6.sh
+```
+
+## Verify
+
+Service status:
+
+```sh
+sudo systemctl status update-unbound-ipv6.service
+```
+
+Timer status:
+
+```sh
+sudo systemctl status update-unbound-ipv6.timer
+sudo systemctl list-timers --all | grep update-unbound-ipv6
+```
+
+Logs:
 
 ```sh
 sudo journalctl -u update-unbound-ipv6.service
 sudo journalctl -f -u update-unbound-ipv6.service
 ```
 
-## Config file header behavior
+Status files:
 
-When edits occur, the script writes/updates a header at the top of the target Unbound config file:
+```sh
+sudo cat /var/lib/update-unbound-ipv6/status.txt
+sudo cat /var/www/html/update-unbound-ipv6-status.json
+```
+
+## Managed config header
+
+When the target config is updated, the script writes a managed header like:
 
 ```text
 # Last edited by: update-unbound-ipv6.sh
 # Last edit time: YYYY-MM-DD HH:MM:SS ZONE
+# Last known good backup: /var/backups/update-unbound-ipv6/local-domains.conf.YYYYMMDD-HHMMSS
 # This file is automatically maintained for IPv6 prefix updates
 #
 ```
 
 ## Notes
 
-- Backups are stored under `/var/backups/unbound-ipv6/` with timestamped filenames.
-- Only changed prefixes trigger rewrite + restart.
-- If validation fails, the previous config is restored automatically.
+- Backups are stored under `/var/backups/update-unbound-ipv6`.
+- Only changed prefixes are rewritten.
+- If validation or reload fails, the previous config is restored.
+- Plaintext and JSON status outputs can each be independently enabled by setting `STATUS_TXT_ENABLED=1` or `STATUS_JSON_ENABLED=1`.
+- If service hardening is enabled, the unit must be allowed to write to:
+  - `/etc/unbound/unbound.conf.d`
+  - `/var/backups/update-unbound-ipv6`
+  - `/var/lib/update-unbound-ipv6` (if `STATUS_TXT_ENABLED=1`)
+  - `/var/www/html` (if `STATUS_JSON_ENABLED=1`)
+  - `/var/lock`
+- If `CONFIG_FILE` is moved elsewhere, update the service `ReadWritePaths=` setting to include that location.
+
+## License
+
+GNU General Public License v3.0 or later.
