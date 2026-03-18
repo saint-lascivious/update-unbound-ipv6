@@ -16,6 +16,9 @@ Detects IPv6 prefix changes and rewrites local Unbound config.
 - Restores the last backup on failure
 - Writes plaintext and/or JSON status files (each independently configurable)
 - Maintains a managed header in the target config file
+- Records last known good backup path in the managed header
+- Opportunistically records backup SHA-256 in the managed header
+- Verifies recorded backup hash on startup (warn by default, strict mode optional)
 
 ## Requirements
 
@@ -25,6 +28,11 @@ Detects IPv6 prefix changes and rewrites local Unbound config.
 - `iproute2`
 - standard POSIX tools (`sh`, `awk`, `sed`, `grep`, `cut`, `mktemp`, etc.)
 - root privileges for install and service management
+
+Optional for backup hash metadata/verification (any one available):
+- `sha256sum` (preferred)
+- `shasum`
+- `openssl`
 
 ## Repository layout
 
@@ -79,6 +87,9 @@ Common settings:
   Default: `/var/backups/update-unbound-ipv6`
 - `NUM_BACKUPS`  
   Default: `10`
+- `BACKUP_HASH_STRICT`  
+  Default: `0` (warn only)  
+  Set to `1` to fail the run if recorded backup hash mismatches the backup file
 - `VERBOSITY`  
   Default: `1` (ERROR)
 - `LOG_TO_SYSLOG`  
@@ -97,12 +108,12 @@ Common settings:
   Default: `/var/www/html`
 - `STATUS_JSON`  
   Default: `$WEBROOT_DIR/update-unbound-ipv6-status.json`
-- `DRY_RUN`  
-  Default: `0` (disabled)
 - `LOCK_DIR`  
   Default: `/var/lock/update-unbound-ipv6.lock`
+- `DRY_RUN`  
+  Default: `0` (disabled)
 
-Recommended: Override settings with systemd instead of editing the script directly.
+Recommended: override settings with systemd instead of editing the script directly.
 
 Create an override:
 
@@ -118,11 +129,13 @@ Environment=CONFIG_FILE=/etc/unbound/unbound.conf.d/local-domains.conf
 Environment=INTERFACE=eth0
 Environment=BACKUP_DIR=/var/backups/update-unbound-ipv6
 Environment=NUM_BACKUPS=10
+Environment=BACKUP_HASH_STRICT=0
 Environment=VERBOSITY=1
 Environment=LOG_TO_SYSLOG=0
 Environment=LOG_TAG=update-unbound-ipv6
 Environment=STATUS_TXT_ENABLED=0
 Environment=STATUS_DIR=/var/lib/update-unbound-ipv6
+Environment=STATUS_TXT=/var/lib/update-unbound-ipv6/status.txt
 Environment=STATUS_JSON_ENABLED=0
 Environment=WEBROOT_DIR=/var/www/html
 Environment=STATUS_JSON=/var/www/html/update-unbound-ipv6-status.json
@@ -137,7 +150,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart update-unbound-ipv6.timer
 ```
 
-If `CONFIG_FILE` is changed to a path outside the service's allowed write locations, the service override may also need a matching `ReadWritePaths=` override as `ReadWritePaths=` does not automatically follow `CONFIG_FILE`.
+If `CONFIG_FILE` is changed to a path outside the service's allowed write locations, the service override may also need a matching `ReadWritePaths=` override, as `ReadWritePaths=` does not automatically follow `CONFIG_FILE`.
 
 ## Usage
 
@@ -157,6 +170,12 @@ Dry run:
 
 ```sh
 sudo env DRY_RUN=1 /usr/local/bin/update-unbound-ipv6.sh
+```
+
+Strict backup hash verification:
+
+```sh
+sudo env BACKUP_HASH_STRICT=1 /usr/local/bin/update-unbound-ipv6.sh
 ```
 
 ## Verify
@@ -196,9 +215,17 @@ When the target config is updated, the script writes a managed header like:
 # Last edited by: update-unbound-ipv6.sh
 # Last edit time: YYYY-MM-DD HH:MM:SS ZONE
 # Last known good backup: /var/backups/update-unbound-ipv6/local-domains.conf.YYYYMMDD-HHMMSS
+# Last known good backup sha256: <64-hex-digest>
 # This file is automatically maintained for IPv6 prefix updates
 #
 ```
+
+Notes:
+- The SHA-256 line is written only if a supported hash utility is available.
+- On startup, if both backup path and hash are present, the script verifies integrity.
+- If verification fails:
+  - `BACKUP_HASH_STRICT=0`: warning only (run continues)
+  - `BACKUP_HASH_STRICT=1`: run fails
 
 ## Notes
 
@@ -207,7 +234,7 @@ When the target config is updated, the script writes a managed header like:
 - If validation or reload fails, the previous config is restored.
 - Plaintext and JSON status outputs can each be independently enabled by setting `STATUS_TXT_ENABLED=1` or `STATUS_JSON_ENABLED=1`.
 - If service hardening is enabled, the unit must be allowed to write to:
-  - `/etc/unbound/unbound.conf.d`
+  - `/etc/unbound/unbound.conf.d` (or wherever `CONFIG_FILE` points)
   - `/var/backups/update-unbound-ipv6`
   - `/var/lib/update-unbound-ipv6` (if `STATUS_TXT_ENABLED=1`)
   - `/var/www/html` (if `STATUS_JSON_ENABLED=1`)

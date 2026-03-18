@@ -26,29 +26,31 @@
 #                       Default: /var/backups/update-unbound-ipv6
 #   NUM_BACKUPS         Number of backups to retain.
 #                       Default: 10
+#   BACKUP_HASH_STRICT  1 = Fail run if recorded backup hash mismatches file.
+#                       Default: 0
 #   VERBOSITY           Log level threshold (0-4).
 #                       0=CRITICAL, 1=ERROR, 2=WARNING, 3=INFO, 4=DEBUG
 #                       Default: 1 (ERROR)
-#   LOG_TO_SYSLOG       1 = also send logs to syslog via logger.
+#   LOG_TO_SYSLOG       1 = Also send logs to syslog via logger.
 #                       Default: 0 (disabled)
 #   LOG_TAG             Log tag for external log integrations.
 #                       Default: update-unbound-ipv6
-#   STATUS_TXT_ENABLED  1 = write plaintext status file.
+#   STATUS_TXT_ENABLED  1 = Write plaintext status file.
 #                       Default: 0 (disabled)
 #   STATUS_DIR          Status output directory (plaintext status file).
 #                       Default: /var/lib/update-unbound-ipv6
 #   STATUS_TXT          Plaintext status file path.
 #                       Default: $STATUS_DIR/status.txt
-#   STATUS_JSON_ENABLED 1 = write JSON status file.
+#   STATUS_JSON_ENABLED 1 = Write JSON status file.
 #                       Default: 0 (disabled)
 #   WEBROOT_DIR         Webroot directory for hosted JSON status.
 #                       Default: /var/www/html
 #   STATUS_JSON         JSON status file path (hosted by default).
 #                       Default: $WEBROOT_DIR/update-unbound-ipv6-status.json
-#   DRY_RUN             1 = no writes, no service actions; log only.
-#                       Default: 0 (disabled)
 #   LOCK_DIR            Lock directory for overlap prevention.
 #                       Default: /var/lock/update-unbound-ipv6.lock
+#   DRY_RUN             1 = No writes, no service actions; log only.
+#                       Default: 0 (disabled)
 #
 # Address type classification:
 #   Global unicast : Everything IPv6 shaped that is not ULA or link-local.
@@ -59,7 +61,7 @@
 #                      cases where the global prefix is expected to be a
 #                      single /64 from a provider-assigned block.
 #                      Probably.
-#                      The main goal is just to distinguish it from ULA and 
+#                      The main goal is just to distinguish it from ULA and
 #                      link-local addresses that may also be present.
 #   ULA            : fc00::/7  - First hextet 0xfc00-0xfdff (64512-65023).
 #   Link-local     : fe80::/10 - First hextet 0xfe80-0xfebf (65152-65215).
@@ -86,6 +88,7 @@ CONFIG_FILE="${CONFIG_FILE:-/etc/unbound/unbound.conf.d/local-domains.conf}"
 INTERFACE="${INTERFACE:-eth0}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/update-unbound-ipv6}"
 NUM_BACKUPS="${NUM_BACKUPS:-10}"
+BACKUP_HASH_STRICT="${BACKUP_HASH_STRICT:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 LOCK_DIR="${LOCK_DIR:-/var/lock/update-unbound-ipv6.lock}"
 export LOG_TAG="${LOG_TAG:-update-unbound-ipv6}"
@@ -106,6 +109,7 @@ CONFIG_FILENAME=$(basename "$CONFIG_FILE")
 
 TEMP_FILE=""
 BACKUP_FILE=""
+BACKUP_HASH=""
 LOCK_HELD=0
 
 CURRENT_GLOBAL=""
@@ -115,10 +119,12 @@ CONFIG_GLOBAL=""
 CONFIG_ULA=""
 CONFIG_LL=""
 
+HEADER_LAST_BACKUP_PATH=""
+HEADER_LAST_BACKUP_HASH=""
+
 trap '[ -n "${TEMP_FILE:-}" ] && [ -f "$TEMP_FILE" ] && rm -f -- "$TEMP_FILE"; \
 if [ "${LOCK_HELD:-0}" -eq 1 ] && [ -d "$LOCK_DIR" ]; then rm -rf -- "$LOCK_DIR"; fi' EXIT INT TERM HUP
 
-###############################################################################
 # Function    : log_message
 # Purpose     : Print timestamped log line and optionally send to syslog.
 # Arguments   : $1 level (0-4), $2.. message
@@ -127,7 +133,6 @@ if [ "${LOCK_HELD:-0}" -eq 1 ] && [ -d "$LOCK_DIR" ]; then rm -rf -- "$LOCK_DIR"
 #               Fallback: if $1 is not 0-4, logs as UNKNOWN at debug level
 #               and treats $1 as part of the message text.
 # Returns     : 0
-###############################################################################
 log_message() {
     level="$1"
     shift || true
@@ -159,24 +164,20 @@ log_message() {
     fi
 }
 
-###############################################################################
 # Function    : json_escape
 # Purpose     : Escape string for JSON value output.
 # Arguments   : $1 text
 # Returns     : escaped text on stdout
-###############################################################################
 json_escape() {
     printf '%s' "$1" | \
         LC_ALL=C tr -d '\000-\010\013\014\016-\037' | \
         sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\t/\\t/g;s/\r/\\r/g;s/\n/\\n/g'
 }
 
-###############################################################################
 # Function    : write_status
 # Purpose     : Write plaintext + JSON state files atomically.
 # Arguments   : $1 result (ok|warn|error), $2 message
 # Returns     : 0 on success, 1 on failure
-###############################################################################
 write_status() {
     status_result="$1"
     status_message="$2"
@@ -254,12 +255,10 @@ write_status() {
     return 0
 }
 
-###############################################################################
 # Function    : exit_with_status
 # Purpose     : Write status then exit.
 # Arguments   : $1 result, $2 message, $3 exit code
 # Returns     : none
-###############################################################################
 exit_with_status() {
     status_result="$1"
     status_message="$2"
@@ -269,12 +268,10 @@ exit_with_status() {
     exit "$status_code"
 }
 
-###############################################################################
 # Function    : check_required_commands
 # Purpose     : Verify required external commands exist.
 # Arguments   : none
 # Returns     : 0 on success, 1 on missing dependency
-###############################################################################
 check_required_commands() {
     missing=0
     for cmd in awk basename cat chmod chown cp cut date find grep head ip mktemp mv sed sort stat systemctl tail tr unbound unbound-checkconf xargs; do
@@ -286,12 +283,10 @@ check_required_commands() {
     [ "$missing" -eq 0 ]
 }
 
-###############################################################################
 # Function    : acquire_lock
 # Purpose     : Prevent overlapping runs.
 # Arguments   : none
 # Returns     : 0 on success, 1 if lock already exists
-###############################################################################
 acquire_lock() {
     if mkdir "$LOCK_DIR" 2>/dev/null; then
         printf "%s\n" "$$" > "$LOCK_DIR/pid" 2>/dev/null || true
@@ -308,12 +303,10 @@ acquire_lock() {
     return 1
 }
 
-###############################################################################
 # Function    : restore_metadata
 # Purpose     : Restore mode/owner/group to captured original values.
 # Arguments   : $1 target file
 # Returns     : 0 on success, 1 on failure
-###############################################################################
 restore_metadata() {
     target_file="$1"
 
@@ -341,12 +334,10 @@ restore_metadata() {
     return 0
 }
 
-###############################################################################
 # Function    : restore_backup
 # Purpose     : Restore CONFIG_FILE from BACKUP_FILE and normalize metadata.
 # Arguments   : none (uses BACKUP_FILE, CONFIG_FILE)
 # Returns     : 0 on success, 1 on failure
-###############################################################################
 restore_backup() {
     if [ -z "$BACKUP_FILE" ] || [ ! -f "$BACKUP_FILE" ]; then
         log_message 1 "No backup file available to restore."
@@ -362,24 +353,124 @@ restore_backup() {
     return 1
 }
 
-###############################################################################
+# Function    : compute_file_hash
+# Purpose     : Opportunistically compute SHA-256 hash for a file.
+# Arguments   : $1 file path
+# Returns     : hash on stdout, empty on failure/unavailable
+compute_file_hash() {
+    file="$1"
+    [ -n "$file" ] && [ -f "$file" ] || return 1
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -- "$file" 2>/dev/null | awk '{print tolower($1)}'
+        return 0
+    fi
+
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -- "$file" 2>/dev/null | awk '{print tolower($1)}'
+        return 0
+    fi
+
+    if command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$file" 2>/dev/null | awk '{print tolower($NF)}'
+        return 0
+    fi
+
+    return 1
+}
+
+# Function    : read_managed_header_backup_meta
+# Purpose     : Read last-known-backup path/hash from managed config header.
+# Arguments   : none (uses CONFIG_FILE)
+# Returns     : 0
+read_managed_header_backup_meta() {
+    HEADER_LAST_BACKUP_PATH=""
+    HEADER_LAST_BACKUP_HASH=""
+
+    line_no=0
+    while IFS= read -r line; do
+        line_no=$((line_no + 1))
+
+        if [ "$line_no" -eq 1 ]; then
+            [ "$line" = "# Last edited by: update-unbound-ipv6.sh" ] || return 0
+            continue
+        fi
+
+        [ "$line_no" -le 25 ] || break
+
+        case "$line" in
+            "# Last edit time: "*) : ;;
+            "# Last known good backup: "*)
+                HEADER_LAST_BACKUP_PATH=${line#"# Last known good backup: "}
+                ;;
+            "# Last known good backup sha256: "*)
+                HEADER_LAST_BACKUP_HASH=$(printf "%s" "${line#"# Last known good backup sha256: "}" | tr 'A-F' 'a-f')
+                ;;
+            "# This file is automatically maintained for IPv6 prefix updates") : ;;
+            "#") : ;;
+            *)
+                break
+                ;;
+        esac
+    done < "$CONFIG_FILE"
+}
+
+# Function    : verify_last_known_backup_integrity
+# Purpose     : Check recorded backup hash against file. Warn by default;
+#               strict mode fails on mismatch.
+# Arguments   : none (uses CONFIG_FILE, BACKUP_HASH_STRICT)
+# Returns     : 0 on success/warn-only, 1 on strict mismatch
+verify_last_known_backup_integrity() {
+    read_managed_header_backup_meta
+
+    [ -n "$HEADER_LAST_BACKUP_PATH" ] || return 0
+
+    if [ ! -f "$HEADER_LAST_BACKUP_PATH" ]; then
+        log_message 2 "Last known good backup referenced in header is missing: $HEADER_LAST_BACKUP_PATH"
+        return 0
+    fi
+
+    [ -n "$HEADER_LAST_BACKUP_HASH" ] || return 0
+
+    calc_hash=$(compute_file_hash "$HEADER_LAST_BACKUP_PATH" 2>/dev/null || true)
+    calc_hash=$(printf "%s" "$calc_hash" | tr 'A-F' 'a-f')
+    [ -n "$calc_hash" ] || {
+        log_message 4 "No SHA-256 utility available; skipping backup hash verification."
+        return 0
+    }
+
+    if [ "$calc_hash" != "$HEADER_LAST_BACKUP_HASH" ]; then
+        if [ "$BACKUP_HASH_STRICT" = "1" ]; then
+            log_message 1 "Last known good backup hash mismatch (strict mode): $HEADER_LAST_BACKUP_PATH"
+            return 1
+        fi
+        log_message 2 "Last known good backup hash mismatch (may have been modified): $HEADER_LAST_BACKUP_PATH"
+        return 0
+    fi
+
+    log_message 4 "Last known good backup hash verified."
+    return 0
+}
+
 # Function    : update_config_header
-# Purpose     : Insert/update script-managed header, edit timestamp, and
-#               optional last known good backup path.
-# Arguments   : $1 config file path, $2 backup file path (optional)
+# Purpose     : Insert/update script-managed header, edit timestamp, optional
+#               last known good backup path, and optional backup SHA-256 hash.
+# Arguments   : $1 config file path, $2 backup file path (optional),
+#               $3 backup file sha256 hash (optional)
 # Returns     : 0 on success, 1 on failure
-###############################################################################
 update_config_header() {
     config_file="$1"
     backup_file="$2"
+    backup_hash="$3"
     timestamp=$(date '+%Y-%m-%d %H:%M:%S %Z')
     header_tmp=$(mktemp "${config_file}.hdr.XXXXXX") || return 1
 
-    awk -v ts="$timestamp" -v bkp="$backup_file" '
+    awk -v ts="$timestamp" -v bkp="$backup_file" -v hsh="$backup_hash" '
         BEGIN {
             print "# Last edited by: update-unbound-ipv6.sh"
             print "# Last edit time: " ts
             if (bkp != "") print "# Last known good backup: " bkp
+            if (hsh != "") print "# Last known good backup sha256: " hsh
             print "# This file is automatically maintained for IPv6 prefix updates"
             print "#"
         }
@@ -392,6 +483,7 @@ update_config_header() {
         managed_header {
             if ($0 ~ /^# Last edit time: /) next
             if ($0 ~ /^# Last known good backup: /) next
+            if ($0 ~ /^# Last known good backup sha256: /) next
             if ($0 == "# This file is automatically maintained for IPv6 prefix updates") next
             if ($0 == "#") next
             managed_header=0
@@ -409,13 +501,11 @@ update_config_header() {
     }
 }
 
-###############################################################################
 # Function    : ipv6_to_prefix4
 # Purpose     : Convert IPv6 (compressed/expanded) to canonical /64 prefix
 #               (first 4 hextets, zero-padded lowercase).
 # Arguments   : $1 IPv6 address (no CIDR suffix)
 # Returns     : prefix on stdout, empty on parse failure
-###############################################################################
 ipv6_to_prefix4() {
     printf "%s\n" "$1" | awk '
         function pad4(h) {
@@ -463,7 +553,6 @@ ipv6_to_prefix4() {
     '
 }
 
-###############################################################################
 # Function    : get_current_ipv6
 # Purpose     : Get global, ULA (fc00::/7), and link-local (fe80::/10) /64
 #               prefixes from INTERFACE.
@@ -472,7 +561,6 @@ ipv6_to_prefix4() {
 #               LL     : fe80::/10 — first hextet 0xfe80-0xfebf (65152-65215)
 # Arguments   : none
 # Returns     : "<global_prefix>|<ula_prefix>|<ll_prefix>"
-###############################################################################
 get_current_ipv6() {
     global_addr=$(ip -6 -o addr show dev "$INTERFACE" scope global 2>/dev/null | \
         awk '
@@ -541,7 +629,6 @@ get_current_ipv6() {
     printf "%s|%s|%s\n" "$global_prefix" "$ula_prefix" "$ll_prefix"
 }
 
-###############################################################################
 # Function    : get_config_prefixes
 # Purpose     : Get global, ULA (fc00::/7), and link-local (fe80::/10) /64
 #               prefixes from CONFIG_FILE.
@@ -551,7 +638,6 @@ get_current_ipv6() {
 #               LL     : fe80::/10 — first hextet 0xfe80-0xfebf (65152-65215)
 # Arguments   : none
 # Returns     : "<global_prefix>|<ula_prefix>|<ll_prefix>"
-###############################################################################
 get_config_prefixes() {
     awk '
         function pad4(h) {
@@ -627,7 +713,6 @@ get_config_prefixes() {
     ' "$CONFIG_FILE"
 }
 
-###############################################################################
 # Function    : rewrite_config_prefixes
 # Purpose     : Rewrite matching IPv6 addresses from old prefixes to new.
 #               Supports compressed and expanded addresses in config.
@@ -637,7 +722,6 @@ get_config_prefixes() {
 #               $5 old ula prefix,    $6 new ula prefix,
 #               $7 old ll prefix,     $8 new ll prefix
 # Returns     : 0 on success, 1 on failure
-###############################################################################
 rewrite_config_prefixes() {
     src="$1"
     dst="$2"
@@ -714,24 +798,20 @@ rewrite_config_prefixes() {
     ' "$src" > "$dst"
 }
 
-###############################################################################
 # Function    : prune_backups
 # Purpose     : Keep most recent NUM_BACKUPS backups for this config file.
 # Arguments   : none
 # Returns     : 0
-###############################################################################
 prune_backups() {
     start=$((NUM_BACKUPS + 1))
     find "$BACKUP_DIR" -name "${CONFIG_FILENAME}.*" -type f -printf '%T@ %p\n' | \
         sort -rn | tail -n +"$start" | cut -d' ' -f2- | xargs -r rm --
 }
 
-###############################################################################
 # Function    : reload_or_restart_unbound
 # Purpose     : Reload first; fallback to restart if reload fails.
 # Arguments   : none
 # Returns     : 0 on success, 1 on failure
-###############################################################################
 reload_or_restart_unbound() {
     if systemctl reload unbound; then
         log_message 3 "Unbound reloaded successfully."
@@ -746,8 +826,6 @@ reload_or_restart_unbound() {
 
     return 1
 }
-
-# ---- Startup checks ----------------------------------------------------------
 
 if ! check_required_commands; then
     exit_with_status "error" "required command check failed" 1
@@ -766,6 +844,14 @@ case "$NUM_BACKUPS" in
     ''|*[!0-9]*|0)
         log_message 1 "NUM_BACKUPS must be a positive integer; got $NUM_BACKUPS"
         exit_with_status "error" "invalid NUM_BACKUPS value" 1
+        ;;
+esac
+
+case "$BACKUP_HASH_STRICT" in
+    0|1) ;;
+    *)
+        log_message 1 "BACKUP_HASH_STRICT must be 0 or 1; got $BACKUP_HASH_STRICT"
+        exit_with_status "error" "invalid BACKUP_HASH_STRICT value" 1
         ;;
 esac
 
@@ -804,7 +890,10 @@ if ! ORIGINAL_GROUP=$(stat -c '%G' "$CONFIG_FILE"); then
     exit_with_status "error" "failed to read original config group name" 1
 fi
 
-# ---- Prefix discovery --------------------------------------------------------
+if ! verify_last_known_backup_integrity; then
+    log_message 1 "Last known good backup integrity verification failed in strict mode."
+    exit_with_status "error" "last known good backup hash mismatch (strict mode)" 1
+fi
 
 CURRENT_PREFIXES=$(get_current_ipv6)
 CURRENT_GLOBAL=$(printf "%s" "$CURRENT_PREFIXES" | cut -d'|' -f1)
@@ -839,7 +928,7 @@ if [ "$GLOBAL_CHANGED" -eq 0 ] && [ "$ULA_CHANGED" -eq 0 ] && [ "$LL_CHANGED" -e
     [ -n "$CURRENT_GLOBAL" ] && log_message 4 "Global prefix     $CURRENT_GLOBAL"
     [ -n "$CURRENT_ULA" ]    && log_message 4 "ULA prefix        $CURRENT_ULA"
     [ -n "$CURRENT_LL" ]     && log_message 4 "Link-local prefix $CURRENT_LL"
-    exit_with_status "ok" "ipv6 prefixes unchanged" 0
+    exit_with_status "ok" "IPv6 prefixes unchanged" 0
 fi
 
 log_message 3 "IPv6 prefix change detected."
@@ -854,8 +943,6 @@ REWRITE_OLDL=""; REWRITE_NEWL=""
 [ "$GLOBAL_CHANGED" -eq 1 ] && { REWRITE_OLDG="$CONFIG_GLOBAL"; REWRITE_NEWG="$CURRENT_GLOBAL"; }
 [ "$ULA_CHANGED"    -eq 1 ] && { REWRITE_OLDU="$CONFIG_ULA";    REWRITE_NEWU="$CURRENT_ULA"; }
 [ "$LL_CHANGED"     -eq 1 ] && { REWRITE_OLDL="$CONFIG_LL";     REWRITE_NEWL="$CURRENT_LL"; }
-
-# ---- Build staged file -------------------------------------------------------
 
 TEMP_FILE=$(mktemp "${CONFIG_FILE}.tmp.XXXXXX") || {
     log_message 1 "Failed to create temp file."
@@ -880,8 +967,6 @@ if [ "$DRY_RUN" = "1" ]; then
     exit_with_status "ok" "dry run complete; no changes written" 0
 fi
 
-# ---- Backup + deploy ---------------------------------------------------------
-
 BACKUP_FILE="$BACKUP_DIR/${CONFIG_FILENAME}.$(date +%Y%m%d-%H%M%S)"
 cp -p "$CONFIG_FILE" "$BACKUP_FILE" || {
     log_message 1 "Failed to create backup."
@@ -889,7 +974,14 @@ cp -p "$CONFIG_FILE" "$BACKUP_FILE" || {
 }
 log_message 3 "Backed up config to $BACKUP_FILE"
 
-if ! update_config_header "$TEMP_FILE" "$BACKUP_FILE"; then
+BACKUP_HASH=$(compute_file_hash "$BACKUP_FILE" 2>/dev/null || true)
+if [ -n "$BACKUP_HASH" ]; then
+    log_message 4 "Computed backup SHA-256 hash for header metadata."
+else
+    log_message 4 "Could not compute backup SHA-256 hash; proceeding without hash metadata."
+fi
+
+if ! update_config_header "$TEMP_FILE" "$BACKUP_FILE" "$BACKUP_HASH"; then
     log_message 1 "Failed to update config header in staged config."
     rm -f -- "$BACKUP_FILE" || true
     BACKUP_FILE=""
