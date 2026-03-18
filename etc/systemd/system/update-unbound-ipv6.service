@@ -10,14 +10,18 @@ User=root
 Group=root
 UMask=0027
 
+ExecStartPre=/usr/bin/install -d -m 0750 /var/backups/update-unbound-ipv6
 ExecStartPre=/bin/sh -ec 'test -x /usr/local/bin/update-unbound-ipv6.sh'
-
-Environment=BACKUP_DIR=/var/backups/update-unbound-ipv6
-Environment=STATUS_DIR=/var/lib/update-unbound-ipv6
-Environment=WEBROOT_DIR=/var/www/html
-Environment=LOCK_DIR=/var/lock/update-unbound-ipv6.lock
-
 ExecStart=/usr/local/bin/update-unbound-ipv6.sh
+
+StateDirectory=update-unbound-ipv6
+RuntimeDirectory=update-unbound-ipv6
+RuntimeDirectoryMode=0750
+
+Environment=STATUS_DIR=%S/update-unbound-ipv6
+Environment=BACKUP_DIR=/var/backups/update-unbound-ipv6
+Environment=WEBROOT_DIR=/var/www/html
+Environment=LOCK_DIR=%t/update-unbound-ipv6/lock
 
 StandardOutput=journal
 StandardError=journal
@@ -27,7 +31,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 
-ReadWritePaths=/etc/unbound/unbound.conf.d /var/backups/update-unbound-ipv6 /var/lib/update-unbound-ipv6 /var/www/html /var/lock
+ReadWritePaths=/etc/unbound/unbound.conf.d /var/backups /var/www/html
 
 [Install]
 WantedBy=multi-user.target
