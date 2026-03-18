@@ -2,6 +2,21 @@
 
 Detects IPv6 prefix changes and rewrites local Unbound config.
 
+- [Features](#features)
+- [Requirements](#requirements)
+- [Repository layout](#repository-layout)
+- [Install](#install)
+- [Configuration](#configuration)
+- [Command-line options](#command-line-options)
+- [Usage](#usage)
+- [Exit codes](#exit-codes)
+- [Verify](#verify)
+- [Managed config header](#managed-config-header)
+- [Notes](#notes)
+- [License](#license)
+
+---
+
 ## Features
 
 - Detects current IPv6 prefixes on an interface
@@ -20,6 +35,8 @@ Detects IPv6 prefix changes and rewrites local Unbound config.
 - Opportunistically records backup SHA-256 in the managed header
 - Verifies recorded backup hash on startup (warn by default, strict mode optional)
 
+<p align="right"><a href="#update-unbound-ipv6">↑ Back to top</a></p>
+
 ## Requirements
 
 - Linux
@@ -34,6 +51,8 @@ Optional for backup hash metadata/verification (any one available):
 - `shasum`
 - `openssl`
 
+<p align="right"><a href="#update-unbound-ipv6">↑ Back to top</a></p>
+
 ## Repository layout
 
 Expected files:
@@ -42,6 +61,8 @@ Expected files:
 - `etc/systemd/system/update-unbound-ipv6.service`
 - `etc/systemd/system/update-unbound-ipv6.timer`
 - `etc/unbound/unbound.conf.d/local-domains.conf` (example)
+
+<p align="right"><a href="#update-unbound-ipv6">↑ Back to top</a></p>
 
 ## Install
 
@@ -72,6 +93,8 @@ Reload systemd and enable the timer:
 sudo systemctl daemon-reload
 sudo systemctl enable --now update-unbound-ipv6.timer
 ```
+
+<p align="right"><a href="#update-unbound-ipv6">↑ Back to top</a></p>
 
 ## Configuration
 
@@ -152,6 +175,30 @@ sudo systemctl restart update-unbound-ipv6.timer
 
 If `CONFIG_FILE` is changed to a path outside the service's allowed write locations, the service override may also need a matching `ReadWritePaths=` override, as `ReadWritePaths=` does not automatically follow `CONFIG_FILE`.
 
+<p align="right"><a href="#update-unbound-ipv6">↑ Back to top</a></p>
+
+## Command-line options
+
+Usage:
+
+```sh
+update-unbound-ipv6.sh [v|version|--version|h|help|--help|-h]
+```
+
+Supported arguments:
+
+- `v`, `version`, `--version`  
+  Print script name and version, then exit.
+- `h`, `help`, `--help`, `-h`  
+  Print help/usage text, then exit.
+
+Behavior:
+
+- No arguments: runs normal update flow.
+- Unknown arguments: print error + help to stderr and exit with code `2`.
+
+<p align="right"><a href="#update-unbound-ipv6">↑ Back to top</a></p>
+
 ## Usage
 
 Run once manually:
@@ -177,6 +224,27 @@ Strict backup hash verification:
 ```sh
 sudo env BACKUP_HASH_STRICT=1 /usr/local/bin/update-unbound-ipv6.sh
 ```
+
+Print version/help:
+
+```sh
+sudo /usr/local/bin/update-unbound-ipv6.sh --version
+sudo /usr/local/bin/update-unbound-ipv6.sh --help
+```
+
+<p align="right"><a href="#update-unbound-ipv6">↑ Back to top</a></p>
+
+## Exit codes
+
+- `0`  
+  Success.  
+  Note: non-fatal warning outcomes (for example, no IPv6 prefixes detected) still exit `0`.
+- `1`  
+  Error (for example: dependency check failure, config parse/update failure, backup failure, validation failure, reload/restart failure, strict hash mismatch).
+- `2`  
+  Invalid CLI argument.
+
+<p align="right"><a href="#update-unbound-ipv6">↑ Back to top</a></p>
 
 ## Verify
 
@@ -207,6 +275,8 @@ sudo cat /var/lib/update-unbound-ipv6/status.txt
 sudo cat /var/www/html/update-unbound-ipv6-status.json
 ```
 
+<p align="right"><a href="#update-unbound-ipv6">↑ Back to top</a></p>
+
 ## Managed config header
 
 When the target config is updated, the script writes a managed header like:
@@ -227,6 +297,8 @@ Notes:
   - `BACKUP_HASH_STRICT=0`: warning only (run continues)
   - `BACKUP_HASH_STRICT=1`: run fails
 
+<p align="right"><a href="#update-unbound-ipv6">↑ Back to top</a></p>
+
 ## Notes
 
 - Backups are stored under `/var/backups/update-unbound-ipv6`.
@@ -241,6 +313,37 @@ Notes:
   - `/var/lock`
 - If `CONFIG_FILE` is moved elsewhere, update the service `ReadWritePaths=` setting to include that location.
 
+<p align="right"><a href="#update-unbound-ipv6">↑ Back to top</a></p>
+
 ## License
 
 GNU General Public License v3.0 or later.
+
+```text
+    Copyright (C) 2026 saint-lascivious (Hayden Pearce)
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+```
+
+<p align="right"><a href="#update-unbound-ipv6">↑ Back to top</a></p>
+
+---
+
+<p align="center">
+  <sub><sup>
+    <strong>update-unbound-ipv6</strong> ·
+    <a href="https://github.com/saint-lascivious/update-unbound-ipv6">Repository</a> ·
+    <a href="https://github.com/saint-lascivious/update-unbound-ipv6/issues">Issues</a>
+  </sup></sub>
+</p>

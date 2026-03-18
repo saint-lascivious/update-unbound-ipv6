@@ -52,6 +52,12 @@
 #   DRY_RUN             1 = No writes, no service actions; log only.
 #                       Default: 0 (disabled)
 #
+# CLI arguments:
+#   v | version | --version
+#                       Print script version and exit.
+#   h | help | --help | -h
+#                       Print help and exit.
+#
 # Address type classification:
 #   Global unicast : Everything IPv6 shaped that is not ULA or link-local.
 #                      Note: this is a heuristic based on the first hextet,
@@ -82,7 +88,15 @@
 #   update-unbound-ipv6.service → One-shot systemd unit.
 #   update-unbound-ipv6.timer → Periodic scheduler.
 #   local-domains.conf → Example Unbound config fragment.
+#
+# Exit codes:
+#   0   Success
+#   1   Error (e.g. validation failure, backup failure, service reload failure)
+#   2   Invalid CLI argument
 # ==============================================================================
+
+SCRIPT_NAME="update-unbound-ipv6"
+SCRIPT_VERSION="0.1.0"
 
 CONFIG_FILE="${CONFIG_FILE:-/etc/unbound/unbound.conf.d/local-domains.conf}"
 INTERFACE="${INTERFACE:-eth0}"
@@ -124,6 +138,57 @@ HEADER_LAST_BACKUP_HASH=""
 
 trap '[ -n "${TEMP_FILE:-}" ] && [ -f "$TEMP_FILE" ] && rm -f -- "$TEMP_FILE"; \
 if [ "${LOCK_HELD:-0}" -eq 1 ] && [ -d "$LOCK_DIR" ]; then rm -rf -- "$LOCK_DIR"; fi' EXIT INT TERM HUP
+
+# Function    : print_version
+# Purpose     : Print script version.
+# Arguments   : none
+# Returns     : 0
+print_version() {
+    printf "%s %s\n" "$SCRIPT_NAME" "$SCRIPT_VERSION"
+}
+
+# Function    : print_help
+# Purpose     : Print CLI usage.
+# Arguments   : none
+# Returns     : 0
+print_help() {
+    script_invocation=$(basename "$0")
+    printf "Usage: %s [v|version|--version|h|help|--help|-h]\n" "$script_invocation"
+    printf "\n"
+    printf "No argument runs the normal update flow.\n"
+    printf "\n"
+    printf "Arguments:\n"
+    printf "  v | version | --version   Print version and exit\n"
+    printf "  h | help | --help | -h    Print this help and exit\n"
+    printf "\n"
+    printf "Configuration is controlled by environment variables.\n"
+}
+
+# Function    : parse_cli_args
+# Purpose     : Handle supported command-line arguments.
+# Arguments   : "$@"
+# Returns     : 0 to continue normal execution; exits on handled/invalid args
+parse_cli_args() {
+    [ "$#" -eq 0 ] && return 0
+
+    for arg in "$@"; do
+        case "$arg" in
+            v|version|--version)
+                print_version
+                exit 0
+                ;;
+            h|help|--help|-h)
+                print_help
+                exit 0
+                ;;
+            *)
+                printf "Unknown argument: %s\n\n" "$arg" >&2
+                print_help >&2
+                exit 2
+                ;;
+        esac
+    done
+}
 
 # Function    : log_message
 # Purpose     : Print timestamped log line and optionally send to syslog.
@@ -826,6 +891,8 @@ reload_or_restart_unbound() {
 
     return 1
 }
+
+parse_cli_args "$@"
 
 if ! check_required_commands; then
     exit_with_status "error" "required command check failed" 1
